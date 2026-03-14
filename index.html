@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Three.js FBO Particles</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background-color: #020617; /* Dark background to make bloom pop */
+    }
+    canvas {
+      display: block;
+    }
+  </style>
+  <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <script type="module">
+    import * as THREE from 'three';
+    import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer.js';
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+    import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+
+    // --- State & Config ---
+    let fboMouse = new THREE.Vector3(0, 0, 0);
+    const sizes = { width: window.innerWidth, height: window.innerHeight };
+
+    // --- Three.js Scene Setup ---
+    const scene = new THREE.Scene();
+    // Use Orthographic camera to match the 2D plane coordinate system of the original project
+    const camera = new THREE.OrthographicCamera(0, sizes.width, sizes.height, 0, -1000, 1000);
+    camera.position.z = 10;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(sizes.width, sizes.height);
+    document.body.appendChild(renderer.domElement);
+
+    // --- Post Processing (Bloom) ---
+    const BLOOM_LAYER = 1;
+    const bloomComposer = new EffectComposer(renderer);
+    const finalComposer = new EffectComposer(renderer);
+
+    bloomComposer.addPass(new RenderPass(scene, camera));
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(sizes.width, sizes.height), 1.5, 0.4, 0.85);
+    bloomComposer.addPass(bloomPass);
+    bloomComposer.renderToScreen = false;
+
+    const finalPass = new ShaderPass({
+      uniforms: { baseTexture: { value: null }, bloomTexture: { value: null } },
+      vertexShader: `
+        varying vec2 vUv; 
+        void main() { 
+          vUv = uv; 
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); 
+        }`,
+      fragmentShader: `
+        uniform sampler2D baseTexture; 
+        uniform sampler2D bloomTexture; 
+        varying vec2 vUv; 
+        void main() { 
+          gl_FragColor = texture2D(baseTexture, vUv) + texture2D(bloomTexture, vUv); 
+        }`
+    }, 'baseTexture');
+    
+    finalComposer.addPass(new RenderPass(scene, camera));
+    finalComposer.addPass(finalPass);
+
+    // --- GPU Particles (FBO) ---
+    const COMPUTE_SIZE = 128; // 128x128 = 16,384 particles
+    let gpuCompute, positionVariable, velocityVariable, pointsMaterial;
+
+    function initGpuCompute() {
+      gpuCompute = new GPUComputationRenderer(COMPUTE_SIZE, COMPUTE_SIZE, renderer);
+      const posTex = gpuCompute.createTexture();
+      const velTex = gpuCompute.createTexture();
+      
+      const posData = posTex.image.data;
+      for(let i = 0; i < posData.length; i += 4) {
+        // Distribute particles across the screen randomly
+        posData[i] = Math.random() * sizes.width;
+        posData[i+1] = Math.random() * sizes.height;
+        posData[i+2] = 0; // z
+        posData[i+3] = 1; // w
+      }
+
+      positionVariable = gpuCompute.addVariable('texturePosition', `
+        uniform vec2 uBounds;
+        void main() {
+          vec2 uv = gl_FragCoord.xy / resolution.xy;
+          vec4 pos = texture2D(texturePosition, uv);
+          vec4 vel = texture2D(textureVelocity, uv);
+          
+          vec3 nextPos = pos.xyz + vel.xyz;
+
+          // Optional: Wrap particles around screen if they fly off
+          if(nextPos.x < 0.0) nextPos.x = uBounds.x;
+          if(nextPos.x > uBounds.x) nextPos.x = 0.0;
+          if(nextPos.y < 0.0) nextPos.y = uBounds.y;
+          if(nextPos.y > uBounds.y) nextPos.y = 0.0;
+
+          gl_FragColor = vec4(nextPos, 1.0);
+        }
+      `, posTex);
+
+      velocityVariable = gpuCompute.addVariable('textureVelocity', `
+        uniform vec3 uMouse;
+        void main() {
+          vec2 uv = gl_FragCoord.xy / resolution.xy;
+          vec3 pos = texture2D(texturePosition, uv).xyz;
+          vec3 vel = texture2D(textureVelocity, uv).xyz;
+          
+          vec3 dir = pos - uMouse;
+          float dist = length(dir);
+          dir = normalize(dir);
+          
+          // Mouse repulsion logic
+          if(dist < 150.0) {
+            float force = (150.0 - dist) / 150.0;
+            vel.xy += dir.xy * force * 2.0;
+          }
+          
+          // Friction / Damping
+          vel *= 0.95;
+          
+          gl_FragColor = vec4(vel, 1.0);
+        }
+      `, velTex);
+
+      gpuCompute.setVariableDependencies(positionVariable, [positionVariable, velocityVariable]);
+      gpuCompute.setVariableDependencies(velocityVariable, [positionVariable, velocityVariable]);
+      
+      positionVariable.material.uniforms.uBounds = { value: new THREE.Vector2(sizes.width, sizes.height) };
+      velocityVariable.material.uniforms.uMouse = { value: fboMouse };
+      
+      const error = gpuCompute.init();
+      if (error !== null) console.error(error);
+    }
+
+    initGpuCompute();
+
+    // --- Particle Geometry & Material ---
+    const particlesGeom = new THREE.BufferGeometry();
+    const refs = new Float32Array(COMPUTE_SIZE * COMPUTE_SIZE * 2);
+    
+    for(let i = 0; i < COMPUTE_SIZE * COMPUTE_SIZE; i++) {
+      const x = (i % COMPUTE_SIZE) / COMPUTE_SIZE;
+      const y = Math.floor(i / COMPUTE_SIZE) / COMPUTE_SIZE;
+      refs[i*2] = x;
+      refs[i*2+1] = y;
+    }
+    
+    // Provide an empty position buffer, actual positions come from texture
+    particlesGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(COMPUTE_SIZE * COMPUTE_SIZE * 3), 3));
+    particlesGeom.setAttribute('reference', new THREE.BufferAttribute(refs, 2));
+
+    pointsMaterial = new THREE.ShaderMaterial({
+      uniforms: { 
+        uPositionTexture: { value: null }, 
+        uTime: { value: 0 } 
+      },
+      vertexShader: `
+        uniform sampler2D uPositionTexture; 
+        attribute vec2 reference; 
+        varying vec3 vPos;
+        void main() { 
+          vec3 pos = texture2D(uPositionTexture, reference).xyz; 
+          vPos = pos;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0); 
+          gl_PointSize = 2.5; 
+        }`,
+      fragmentShader: `
+        varying vec3 vPos;
+        void main() { 
+          // Soft circular particle
+          vec2 c = gl_PointCoord - 0.5;
+          if (length(c) > 0.5) discard;
+          
+          // Blueish glowing color
+          gl_FragColor = vec4(0.3, 0.7, 1.0, 0.8); 
+        }`,
+      transparent: true, 
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+
+    const particles = new THREE.Points(particlesGeom, pointsMaterial);
+    particles.layers.set(BLOOM_LAYER); // Assign to bloom layer
+    scene.add(particles);
+
+    // --- Interaction ---
+    window.addEventListener('pointermove', (e) => {
+      // Convert standard screen coordinates to Orthographic camera coordinates (Y is inverted)
+      fboMouse.x = e.clientX;
+      fboMouse.y = sizes.height - e.clientY;
+    });
+
+    window.addEventListener('resize', () => {
+      sizes.width = window.innerWidth;
+      sizes.height = window.innerHeight;
+      
+      camera.right = sizes.width;
+      camera.top = sizes.height;
+      camera.updateProjectionMatrix();
+      
+      renderer.setSize(sizes.width, sizes.height);
+      bloomComposer.setSize(sizes.width, sizes.height);
+      finalComposer.setSize(sizes.width, sizes.height);
+      
+      positionVariable.material.uniforms.uBounds.value.set(sizes.width, sizes.height);
+    });
+
+    // --- Main Render Loop ---
+    function raf(time) {
+      requestAnimationFrame(raf);
+
+      // 1. Update GPU Compute (Physics)
+      gpuCompute.compute();
+      pointsMaterial.uniforms.uPositionTexture.value = gpuCompute.getCurrentRenderTarget(positionVariable).texture;
+      pointsMaterial.uniforms.uTime.value = time * 0.001;
+
+      // 2. Render Bloom Layer
+      camera.layers.set(BLOOM_LAYER);
+      bloomComposer.render();
+      
+      // 3. Pass bloom texture to final composer and render everything
+      finalPass.uniforms.bloomTexture.value = bloomComposer.readBuffer.texture;
+      camera.layers.set(0);
+      finalComposer.render();
+    }
+
+    raf(performance.now());
+  </script>
+</body>
+</html>
