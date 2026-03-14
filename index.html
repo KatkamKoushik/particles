@@ -3,46 +3,16 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Story Mode Particles</title>
+  <title>Active Swirl & Disco Particles</title>
   <style>
     body {
       margin: 0;
       overflow: hidden;
       background-color: #020617;
-      cursor: none; /* Hide default cursor */
-      font-family: sans-serif;
     }
     canvas {
       display: block;
     }
-    /* Custom Cursor */
-    #custom-cursor {
-      position: fixed;
-      top: 0; left: 0;
-      width: 20px; height: 20px;
-      background-color: white;
-      border-radius: 50%;
-      transform: translate(-50%, -50%);
-      pointer-events: none;
-      z-index: 9999;
-      box-shadow: 0 0 15px rgba(255, 255, 255, 0.8);
-      transition: background-color 0.2s, box-shadow 0.2s, transform 0.1s ease-out;
-    }
-    /* Stunned Cursor State */
-    body.stunned #custom-cursor {
-      background-color: gold;
-      box-shadow: 0 0 30px gold, 0 0 60px red;
-    }
-    /* Instructions UI */
-    #ui {
-      position: absolute;
-      top: 20px;
-      left: 20px;
-      color: rgba(255, 255, 255, 0.6);
-      pointer-events: none;
-      transition: opacity 1s;
-    }
-    body.angry #ui { opacity: 0; }
   </style>
   <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
   <script type="importmap">
@@ -55,12 +25,6 @@
   </script>
 </head>
 <body>
-  <div id="custom-cursor"></div>
-  <div id="ui">
-    <h2>Phase 1: Calm</h2>
-    <p>Disturb the swirling particles by shaking your mouse near the center...</p>
-  </div>
-
   <script type="module">
     import * as THREE from 'three';
     import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer.js';
@@ -70,26 +34,8 @@
     import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
     // --- State & Config ---
+    let fboMouse = new THREE.Vector3(window.innerWidth / 2, window.innerHeight / 2, 0);
     const sizes = { width: window.innerWidth, height: window.innerHeight };
-    
-    // Mouse Management (Real vs Game logic to handle freezing)
-    let mouse = { 
-      realX: sizes.width / 2, realY: sizes.height / 2, 
-      activeX: sizes.width / 2, activeY: sizes.height / 2 
-    };
-    let fboMouse = new THREE.Vector3(mouse.activeX, sizes.height - mouse.activeY, 0);
-    
-    // Story State
-    let state = {
-      isAngry: false,
-      angerLevel: 0.0, // 0.0 = Calm Green, 1.0 = Angry Red Robot
-      disturbance: 0,  // Builds up as user moves mouse near center
-      stunTimer: 0,
-      bombActive: false
-    };
-
-    // --- DOM Elements ---
-    const cursorEl = document.getElementById('custom-cursor');
 
     // --- Three.js Scene Setup ---
     const scene = new THREE.Scene();
@@ -107,7 +53,9 @@
     const finalComposer = new EffectComposer(renderer);
 
     bloomComposer.addPass(new RenderPass(scene, camera));
-    const bloomPass = new UnrealBloomPass(new THREE.Vector2(sizes.width, sizes.height), 2.5, 0.5, 0.7);
+    
+    // Adjusted bloom to pick up the bright "core" of your fragment shader
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(sizes.width, sizes.height), 1.8, 0.5, 0.8);
     bloomComposer.addPass(bloomPass);
     bloomComposer.renderToScreen = false;
 
@@ -120,45 +68,8 @@
     finalComposer.addPass(new RenderPass(scene, camera));
     finalComposer.addPass(finalPass);
 
-    // --- Generate Robot Face Texture for Target Positions ---
-    const COMPUTE_SIZE = 128; // 16,384 particles
-    let robotTexture;
-
-    function generateRobotTargets() {
-      const canvas = document.createElement('canvas');
-      canvas.width = 128; canvas.height = 128;
-      const ctx = canvas.getContext('2d');
-      
-      // Draw basic robot face pixel art
-      ctx.fillStyle = 'black'; ctx.fillRect(0, 0, 128, 128);
-      ctx.fillStyle = 'white';
-      ctx.fillRect(32, 32, 20, 20); // Left Eye
-      ctx.fillRect(76, 32, 20, 20); // Right Eye
-      ctx.fillRect(40, 80, 48, 16); // Mouth
-      
-      const imgData = ctx.getImageData(0, 0, 128, 128).data;
-      const validCoords = [];
-      for(let i = 0; i < 128 * 128; i++) {
-        if(imgData[i * 4] > 100) validCoords.push({ x: i % 128, y: Math.floor(i / 128) });
-      }
-
-      const data = new Float32Array(COMPUTE_SIZE * COMPUTE_SIZE * 4);
-      for(let i = 0; i < COMPUTE_SIZE * COMPUTE_SIZE; i++) {
-        // Distribute particles evenly across the valid white pixels
-        const coord = validCoords[i % validCoords.length];
-        // Center and scale the robot face to fit the screen
-        data[i*4]   = sizes.width / 2 + (coord.x - 64) * 5.0; 
-        data[i*4+1] = sizes.height / 2 - (coord.y - 64) * 5.0; // Invert Y
-        data[i*4+2] = (Math.random() - 0.5) * 10.0;
-        data[i*4+3] = 1.0;
-      }
-
-      robotTexture = new THREE.DataTexture(data, COMPUTE_SIZE, COMPUTE_SIZE, THREE.RGBAFormat, THREE.FloatType);
-      robotTexture.needsUpdate = true;
-    }
-    generateRobotTargets();
-
     // --- GPU Particles (FBO) ---
+    const COMPUTE_SIZE = 128; // 16,384 particles
     let gpuCompute, positionVariable, velocityVariable, pointsMaterial;
 
     const noiseChunks = `
@@ -232,64 +143,59 @@
       for(let i = 0; i < posData.length; i += 4) {
         posData[i] = Math.random() * sizes.width;
         posData[i+1] = Math.random() * sizes.height;
-        posData[i+2] = 0; posData[i+3] = 1;
+        posData[i+2] = (Math.random() - 0.5) * 50; 
+        posData[i+3] = 1;
       }
 
       positionVariable = gpuCompute.addVariable('texturePosition', `
+        uniform vec2 uBounds;
         void main() {
           vec2 uv = gl_FragCoord.xy / resolution.xy;
           vec4 pos = texture2D(texturePosition, uv);
           vec4 vel = texture2D(textureVelocity, uv);
-          gl_FragColor = vec4(pos.xyz + vel.xyz, 1.0);
+          
+          vec3 nextPos = pos.xyz + vel.xyz;
+
+          // Wrap around screen
+          if(nextPos.x < -100.0) nextPos.x = uBounds.x + 100.0;
+          if(nextPos.x > uBounds.x + 100.0) nextPos.x = -100.0;
+          if(nextPos.y < -100.0) nextPos.y = uBounds.y + 100.0;
+          if(nextPos.y > uBounds.y + 100.0) nextPos.y = -100.0;
+
+          gl_FragColor = vec4(nextPos, 1.0);
         }
       `, posTex);
 
       velocityVariable = gpuCompute.addVariable('textureVelocity', `
         ${noiseChunks}
         uniform vec3 uMouse;
-        uniform vec2 uBounds;
         uniform float uTime;
-        uniform float uAnger;
-        uniform sampler2D uRobotTex;
         
         void main() {
           vec2 uv = gl_FragCoord.xy / resolution.xy;
           vec3 pos = texture2D(texturePosition, uv).xyz;
           vec3 vel = texture2D(textureVelocity, uv).xyz;
           
-          vec2 center = uBounds * 0.5;
+          // 1. Base Active Swirl (Curl Noise)
+          vec3 targetVel = curlNoise(pos * 0.003 + uTime * 0.2) * 2.5;
+          vel += (targetVel - vel) * 0.06;
           
-          // 1. CALM TARGET (Swirling Ring)
-          float angle = uTime * 0.5 + (uv.x * 20.0);
-          float radius = 150.0 + sin(uv.y * 10.0 + uTime) * 50.0;
-          vec3 targetCalm = vec3(center.x + cos(angle)*radius, center.y + sin(angle)*radius, 0.0);
+          // 2. Mouse Vortex Swirl
+          vec3 dir = pos - uMouse;
+          float dist = length(dir);
           
-          // 2. ANGRY TARGET (Robot Face)
-          vec3 targetRobot = texture2D(uRobotTex, uv).xyz;
-          
-          // BLEND TARGETS based on anger level
-          vec3 targetPos = mix(targetCalm, targetRobot, uAnger);
-          
-          // Move towards target
-          vec3 dirTarget = targetPos - pos;
-          float pullStrength = mix(0.02, 0.08, uAnger); // Snaps tighter when angry
-          vel += dirTarget * pullStrength;
-          
-          // 3. MOUSE INTERACTION (Disturbance)
-          vec3 dirMouse = pos - uMouse;
-          float distToMouse = length(dirMouse);
-          
-          if(distToMouse < 150.0) {
-            float force = (150.0 - distToMouse) / 150.0;
-            // Push particles away aggressively
-            vel += normalize(dirMouse) * force * mix(5.0, 15.0, uAnger); 
+          if(dist < 300.0) {
+            float force = (300.0 - dist) / 300.0;
+            vec3 normDir = normalize(dir);
+            // Create a tangent vector for swirling around the mouse
+            vec3 tangent = vec3(-normDir.y, normDir.x, 0.0);
+            
+            // Combine outward push with strong swirling tangent
+            vel += (tangent * 8.0 + normDir * 2.0) * force; 
           }
           
-          // Add organic noise, reduce noise when angry so the robot shape is clearer
-          vel += curlNoise(pos * 0.005 + uTime * 0.2) * mix(1.5, 0.5, uAnger);
-          
-          // Friction
-          vel *= mix(0.92, 0.85, uAnger); // Higher friction when angry to lock into robot shape
+          // Friction to keep movement fluid but controlled
+          vel *= 0.94;
           
           gl_FragColor = vec4(vel, 1.0);
         }
@@ -298,11 +204,9 @@
       gpuCompute.setVariableDependencies(positionVariable, [positionVariable, velocityVariable]);
       gpuCompute.setVariableDependencies(velocityVariable, [positionVariable, velocityVariable]);
       
-      velocityVariable.material.uniforms.uBounds = { value: new THREE.Vector2(sizes.width, sizes.height) };
+      positionVariable.material.uniforms.uBounds = { value: new THREE.Vector2(sizes.width, sizes.height) };
       velocityVariable.material.uniforms.uMouse = { value: fboMouse };
       velocityVariable.material.uniforms.uTime = { value: 0 };
-      velocityVariable.material.uniforms.uAnger = { value: 0.0 };
-      velocityVariable.material.uniforms.uRobotTex = { value: robotTexture };
       
       gpuCompute.init();
     }
@@ -321,36 +225,55 @@
     particlesGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(COMPUTE_SIZE * COMPUTE_SIZE * 3), 3));
     particlesGeom.setAttribute('reference', new THREE.BufferAttribute(refs, 2));
 
+    const particlesFragmentShader = `
+      uniform float uAlpha; 
+      uniform float uTime; 
+      varying vec3 vPos; 
+      
+      void main() { 
+        // 1. Get the distance from the center of the particle
+        vec2 c = gl_PointCoord - 0.5; 
+        float d = length(c); 
+        
+        // 2. Define the Aura (Soft fade from center to edge)
+        float aura = smoothstep(0.5, 0.1, d);
+        
+        // 3. Define the Core (Sharp, tiny bright dot exactly in the middle)
+        float core = smoothstep(0.15, 0.02, d); 
+        
+        // 4. DISCO MATH (Your shifting colors)
+        float r = 0.5 + 0.5 * sin(uTime * 2.0 + vPos.x * 0.005); 
+        float g = 0.5 + 0.5 * sin(uTime * 3.0 + vPos.y * 0.005 + 2.0); 
+        float b = 0.5 + 0.5 * sin(uTime * 1.5 + vPos.z * 0.005 + 4.0); 
+        vec3 baseColor = vec3(r, g, b); 
+        
+        // 5. Combine them: Color the aura, but make the core pure white
+        vec3 finalColor = (baseColor * aura) + (vec3(1.0) * core);
+        
+        // 6. Set opacity based on the aura's fade
+        gl_FragColor = vec4(finalColor, uAlpha * aura); 
+      }
+    `;
+
     pointsMaterial = new THREE.ShaderMaterial({
       uniforms: { 
         uPositionTexture: { value: null }, 
-        uAnger: { value: 0.0 }
+        uTime: { value: 0 },
+        uAlpha: { value: 1.0 }
       },
       vertexShader: `
         uniform sampler2D uPositionTexture; 
         attribute vec2 reference; 
+        varying vec3 vPos;
+        
         void main() { 
           vec3 pos = texture2D(uPositionTexture, reference).xyz; 
+          vPos = pos; // Pass to fragment shader
+          
           gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0); 
-          gl_PointSize = 3.0; 
+          gl_PointSize = 4.0; // Slightly larger to show the core + aura clearly
         }`,
-      fragmentShader: `
-        uniform float uAnger;
-        void main() { 
-          vec2 c = gl_PointCoord - 0.5;
-          float d = length(c);
-          if (d > 0.5) discard;
-          
-          // Soft circular mask
-          float mask = smoothstep(0.5, 0.2, d);
-          
-          // Color transition: Calm Green -> Angry Bright Red
-          vec3 calmColor = vec3(0.1, 0.9, 0.4);
-          vec3 angryColor = vec3(1.0, 0.1, 0.1);
-          vec3 finalColor = mix(calmColor, angryColor, uAnger);
-          
-          gl_FragColor = vec4(finalColor, mask * 0.9); 
-        }`,
+      fragmentShader: particlesFragmentShader,
       transparent: true, 
       blending: THREE.AdditiveBlending,
       depthWrite: false
@@ -360,41 +283,10 @@
     particles.layers.set(BLOOM_LAYER); 
     scene.add(particles);
 
-    // --- BOMB (Gold Sphere) Setup ---
-    const bombGeo = new THREE.SphereGeometry(12, 32, 32);
-    const bombMat = new THREE.MeshBasicMaterial({ color: 0xffd700 }); // Bright Gold
-    const bomb = new THREE.Mesh(bombGeo, bombMat);
-    bomb.visible = false;
-    bomb.layers.set(BLOOM_LAYER); // Make it glow
-    scene.add(bomb);
-    let bombVelocityVector = new THREE.Vector3();
-
-    function fireBomb() {
-      if(state.bombActive) return;
-      state.bombActive = true;
-      bomb.visible = true;
-      
-      // Start from robot's mouth (center screen slightly down)
-      bomb.position.set(sizes.width / 2, sizes.height / 2 - 40, 0);
-      
-      // Aim at where the cursor actively is
-      const target = new THREE.Vector3(mouse.activeX, sizes.height - mouse.activeY, 0);
-      bombVelocityVector.subVectors(target, bomb.position).normalize().multiplyScalar(15);
-    }
-
-    // --- Interaction & Event Listeners ---
-    window.addEventListener('mousemove', (e) => {
-      mouse.realX = e.clientX;
-      mouse.realY = e.clientY;
-
-      // Track disturbance (shaking mouse fast near the particles builds anger)
-      if(!state.isAngry && state.stunTimer <= 0) {
-        const distToCenter = Math.hypot(mouse.realX - sizes.width/2, mouse.realY - sizes.height/2);
-        if(distToCenter < 300) {
-          const movementDelta = Math.abs(e.movementX) + Math.abs(e.movementY);
-          state.disturbance += movementDelta * 0.1;
-        }
-      }
+    // --- Interaction ---
+    window.addEventListener('pointermove', (e) => {
+      fboMouse.x = e.clientX;
+      fboMouse.y = sizes.height - e.clientY;
     });
 
     window.addEventListener('resize', () => {
@@ -409,99 +301,26 @@
       bloomComposer.setSize(sizes.width, sizes.height);
       finalComposer.setSize(sizes.width, sizes.height);
       
-      velocityVariable.material.uniforms.uBounds.value.set(sizes.width, sizes.height);
-      generateRobotTargets(); // Re-center robot map
+      positionVariable.material.uniforms.uBounds.value.set(sizes.width, sizes.height);
     });
 
-    // --- Main Game/Render Loop ---
+    // --- Main Render Loop ---
     const clock = new THREE.Clock();
 
     function raf() {
       requestAnimationFrame(raf);
-      const time = clock.getElapsedTime();
-
-      // --- 1. Story Logic Update ---
       
-      // Handle Stun State
-      if(state.stunTimer > 0) {
-        state.stunTimer -= 16; // approx 60fps decrement
-      } else {
-        // Not stunned -> custom cursor follows real mouse
-        mouse.activeX = mouse.realX;
-        mouse.activeY = mouse.realY;
-      }
+      const elapsedTime = clock.getElapsedTime();
 
-      // Update Custom Cursor DOM visually
-      cursorEl.style.transform = `translate(${mouse.activeX}px, ${mouse.activeY}px) translate(-50%, -50%)`;
-
-      // Disturbance -> Anger Logic
-      if (!state.isAngry) {
-        if(state.disturbance > 0) state.disturbance -= 0.2; // Cool down over time
-        
-        if(state.disturbance > 150) {
-          state.isAngry = true;
-          document.body.classList.add('angry');
-          // Fire the bomb 3 seconds after turning into a robot
-          setTimeout(fireBomb, 3000);
-        }
-      }
-
-      // Lerp Anger Level for smooth color/shape transitions
-      if (state.isAngry) {
-        state.angerLevel = Math.min(1.0, state.angerLevel + 0.015);
-      } else {
-        state.angerLevel = Math.max(0.0, state.angerLevel - 0.015);
-      }
-
-      // --- 2. Bomb Logic ---
-      if (state.bombActive) {
-        bomb.position.add(bombVelocityVector);
-
-        // Check Collision with active cursor
-        // Note: Ortho Camera Y goes from 0 at bottom to height at top
-        const bombScreenY = sizes.height - bomb.position.y;
-        const distToCursor = Math.hypot(bomb.position.x - mouse.activeX, bombScreenY - mouse.activeY);
-
-        if (distToCursor < 25) { // Hit radius
-          state.bombActive = false;
-          bomb.visible = false;
-          state.stunTimer = 5000; // Freeze for 5 seconds
-          document.body.classList.add('stunned');
-          
-          // Reset game state after stun ends
-          setTimeout(() => {
-            document.body.classList.remove('stunned');
-            document.body.classList.remove('angry');
-            state.isAngry = false;
-            state.disturbance = 0;
-          }, 5000);
-        }
-
-        // Reset if bomb goes off screen
-        if (bomb.position.x < -100 || bomb.position.x > sizes.width + 100 || 
-            bomb.position.y < -100 || bomb.position.y > sizes.height + 100) {
-          state.bombActive = false;
-          bomb.visible = false;
-          // Missed! Reset to calm
-          document.body.classList.remove('angry');
-          state.isAngry = false;
-          state.disturbance = 0;
-        }
-      }
-
-      // --- 3. FBO & GPU Compute Update ---
-      // Pass active mouse coordinates to shaders (so particles ignore frozen mouse)
-      fboMouse.x = mouse.activeX;
-      fboMouse.y = sizes.height - mouse.activeY;
-      
-      velocityVariable.material.uniforms.uTime.value = time;
-      velocityVariable.material.uniforms.uAnger.value = state.angerLevel;
-      pointsMaterial.uniforms.uAnger.value = state.angerLevel;
-
+      // Update Physics Time
+      velocityVariable.material.uniforms.uTime.value = elapsedTime;
       gpuCompute.compute();
+      
+      // Update Render Time & Positions
       pointsMaterial.uniforms.uPositionTexture.value = gpuCompute.getCurrentRenderTarget(positionVariable).texture;
+      pointsMaterial.uniforms.uTime.value = elapsedTime;
 
-      // --- 4. Render Passes ---
+      // Render Passes
       camera.layers.set(BLOOM_LAYER);
       bloomComposer.render();
       
